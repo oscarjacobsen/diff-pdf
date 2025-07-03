@@ -1,0 +1,187 @@
+diff --git a/diff-pdf.cpp b/diff-pdf.cpp
+index abcdef1..1234567 100644
+--- a/diff-pdf.cpp
++++ b/diff-pdf.cpp
+@@
+ bool g_verbose = false;
+ bool g_skip_identical = false;
+ bool g_mark_differences = false;
+ long g_channel_tolerance = 0;
+ long g_per_page_pixel_tolerance = 0;
+ bool g_grayscale = false;
++bool g_split_output = false;
+
+@@
+     cairo_surface_t *diff =
+-        cairo_image_surface_create(CAIRO_FORMAT_RGB24, rdiff.width, rdiff.height);
++        cairo_image_surface_create(CAIRO_FORMAT_RGB24, rdiff.width, rdiff.height);
++
++    cairo_surface_t *removed = NULL, *added = NULL;
++    if (removal_view)
++        removed = cairo_image_surface_create(CAIRO_FORMAT_RGB24, rdiff.width, rdiff.height);
++    if (addition_view)
++        added = cairo_image_surface_create(CAIRO_FORMAT_RGB24, rdiff.width, rdiff.height);
++    if (removed || added) {
++        if (removed) {
++            cairo_t *cr = cairo_create(removed);
++            cairo_set_source_rgb(cr, 1, 1, 1);
++            cairo_paint(cr);
++            cairo_destroy(cr);
++        }
++        if (added) {
++            cairo_t *cr = cairo_create(added);
++            cairo_set_source_rgb(cr, 1, 1, 1);
++            cairo_paint(cr);
++            cairo_destroy(cr);
++        }
++    }
+
+@@
+                 if ( cr1 > (cr2+g_channel_tolerance) || cr1 < (cr2-g_channel_tolerance)
+                   || cg1 > (cg2+g_channel_tolerance) || cg1 < (cg2-g_channel_tolerance)
+                   || cb1 > (cb2+g_channel_tolerance) || cb1 < (cb2-g_channel_tolerance)
+                    )
+                 {
+                     pixel_diff_count++;
+                     changes = true;
+                     linediff = true;
++
++                    if (removed) {
++                        *(removed_row + x + 0) = cr1;
++                        *(removed_row + x + 1) = cg1;
++                        *(removed_row + x + 2) = cb1;
++                        *(removed_row + x + 3) = 0xff;
++                    }
++                    if (added) {
++                        *(added_row + x + 0) = cr2;
++                        *(added_row + x + 1) = cg2;
++                        *(added_row + x + 2) = cb2;
++                        *(added_row + x + 3) = 0xff;
++                    }
+                 }
+
+@@
+     if ( g_per_page_pixel_tolerance == 0 ? changes : pixel_diff_count > g_per_page_pixel_tolerance)
+     {
+-        return diff;
++        if (removal_view) *removal_view = removed;
++        if (addition_view) *addition_view = added;
++        return diff;
+     }
+     else
+     {
+         cairo_surface_destroy(diff);
++        if (removed) cairo_surface_destroy(removed);
++        if (added) cairo_surface_destroy(added);
+         return NULL;
+     }
+ }
+
+@@
+ bool page_compare(int page, cairo_t *cr_out,
+                   PopplerPage *page1, PopplerPage *page2,
+-                  wxImage *thumbnail = NULL, int thumbnail_width = -1)
++                  wxImage *thumbnail = NULL, int thumbnail_width = -1,
++                  cairo_t *split_cr = NULL)
+ {
+     cairo_surface_t *img1 = page1 ? render_page(page1) : NULL;
+     cairo_surface_t *img2 = page2 ? render_page(page2) : NULL;
+
+-    cairo_surface_t *diff = diff_images(page, img1, img2, 0, 0,
+-                                        thumbnail, thumbnail_width);
++    cairo_surface_t *removed = NULL, *added = NULL;
++    cairo_surface_t *diff = diff_images(page, img1, img2, 0, 0,
++                                        thumbnail, thumbnail_width,
++                                        g_split_output ? &removed : NULL,
++                                        g_split_output ? &added : NULL);
+     const bool has_diff = (diff != NULL);
+
+     if ( cr_out )
+     {
+         ...
+         if (diff || !g_skip_identical)
+             cairo_show_page(cr_out);
+     }
+
++    if (g_split_output && removed && added && split_cr)
++    {
++        for (cairo_surface_t *surf : { removed, added }) {
++            cairo_save(split_cr);
++            cairo_scale(split_cr, 72.0 / g_resolution, 72.0 / g_resolution);
++            cairo_set_source_surface(split_cr, surf, 0, 0);
++            cairo_paint(split_cr);
++            cairo_restore(split_cr);
++            cairo_show_page(split_cr);
++            cairo_surface_destroy(surf);
++        }
++    }
+
+     ...
+     return !has_diff;
+ }
+
+@@
+ bool doc_compare(PopplerDocument *doc1, PopplerDocument *doc2,
+                  const char *pdf_output,
+                  std::vector<bool> *differences,
+                  wxProgressDialog *progress = NULL,
+                  Gutter *gutter = NULL)
+ {
+     int pages_differ = 0;
+     ...
++    cairo_surface_t *split_surface_out = NULL;
++    cairo_t *split_cr_out = NULL;
++    wxString split_file;
++
++    if (g_split_output && pdf_output)
++    {
++        split_file = wxString(pdf_output) + "_split.pdf";
++        double w, h;
++        poppler_page_get_size(poppler_document_get_page(doc1, 0), &w, &h);
++        split_surface_out = cairo_pdf_surface_create(split_file.utf8_str(), w, h);
++        split_cr_out = cairo_create(split_surface_out);
++    }
+
+@@
+         if ( gutter )
+         {
+             ...
+-            page_same = page_compare(page, cr_out, page1, page2,
+-                                     &thumbnail, Gutter::WIDTH);
++            page_same = page_compare(page, cr_out, page1, page2,
++                                     &thumbnail, Gutter::WIDTH,
++                                     split_cr_out);
+             ...
+         }
+         else
+         {
+-            page_same = page_compare(page, cr_out, page1, page2);
++            page_same = page_compare(page, cr_out, page1, page2, NULL, -1,
++                                     split_cr_out);
+         }
+
+@@
+     if ( pdf_output )
+     {
+         cairo_destroy(cr_out);
+         cairo_surface_destroy(surface_out);
+     }
++
++    if (split_cr_out) {
++        cairo_destroy(split_cr_out);
++        cairo_surface_destroy(split_surface_out);
++    }
+
+@@
+     static const wxCmdLineEntryDesc cmd_line_desc[] =
+     {
+         ...
++        { wxCMD_LINE_SWITCH,
++                  NULL, "split", "add pages showing removed and added content separately" },
+
+@@
+     if ( parser.Found("grayscale") )
+         g_grayscale = true;
++
++    if ( parser.Found("split") )
++        g_split_output = true;
